@@ -1,20 +1,34 @@
-# Bridge protocol v1 — Python server ⇄ Lua script inside DaVinci Resolve
+# Bridge protocol (0.3): Python server and the Lua script inside DaVinci Resolve
+
+The request payload and the response envelope are version 1, as upstream. Release 0.3.0 of this
+fork changed how a request reaches the bridge: one Lua file run with `fu:RunScript` instead of a
+folder of hex-named folders read with `GetSubFolderList`. Server and bridge must come from the same
+release; the server checks the `bridge` field of `CMCP_Session` and refuses a mismatch.
 
 Both sides derive every path from `HOME`:
 
 ```
 STATE_DIR = ~/Library/Application Support/Blackmagic Design/DaVinci Resolve/ClaudeMCP
 INBOX     = STATE_DIR/inbox
-PENDING   = INBOX/PENDING                      (zero-byte flag file)
+REQUEST   = INBOX/request.lua
 PREFS     = ~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Profiles/*/Fusion.prefs  (newest)
 ```
 
-The Lua side can only (a) test file existence (`bmd.fileexists`), (b) list subfolder names
-(`resolve:GetMediaStorage():GetSubFolderList(dir)` → full paths) and (c) persist strings with
-`fu:SetData(key, value)`, which rewrites `Fusion.prefs` synchronously. Everything below follows
-from that.
+On Windows (no `HOME`; the installer stamps the state directory into the bridge) the same layout
+sits under Resolve's per-user support folder:
 
-## Request (server → bridge): a folder of folders
+```
+STATE_DIR = %APPDATA%\Blackmagic Design\DaVinci Resolve\Support\ClaudeMCP
+PREFS     = %APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Profiles\*\Fusion.prefs  (newest)
+```
+
+The Lua side cannot read or write files (no `io`, and on 21.2 free no `loadfile`, `dofile` or
+`fusion:SavePrefs` either). It can (a) test file existence (`bmd.fileexists`), (b) run a Lua file
+with `fu:RunScript(path)`, whose script shares the in-memory prefs (`fu:SetPrefs` / `fu:GetPrefs`)
+with the bridge, and (c) persist strings with `fu:SetData(key, value)`, which rewrites
+`Fusion.prefs` synchronously. Everything below follows from that.
+
+## Request (server → bridge): one Lua file
 
 1. `id` = 6–32 chars of `[a-z0-9]`, unique per request (`<base36 time><random>`).
 2. `payload` = UTF-8 bytes of a **Lua table literal without `return`**, e.g.
@@ -23,34 +37,40 @@ from that.
    Strings use long brackets `[=*[ ... ]=*]` with a level that does not occur in the content;
    numbers are plain; booleans `true/false`; JSON arrays become `{a, b}`; JSON objects become
    `{ ["key"] = value }`; `null` becomes `nil` (omitted).
-3. Server creates `INBOX/<id>.tmp/`, then one subfolder per 120-byte slice of `payload`, named
-   `NNNN-<hex>` (`NNNN` zero-padded index from `0000`, lowercase hex of the slice), then renames
-   `INBOX/<id>.tmp` → `INBOX/<id>` (atomic), then creates `PENDING`.
+3. Server writes `REQUEST.tmp` with one line,
+   `fu:SetPrefs("Global.ClaudeMCP.Request", "<id>:<lowercase hex of payload>")`, then renames it
+   to `REQUEST` (atomic). The string holds only `[a-z0-9:]`, so it needs no escaping.
 4. One request in flight at a time across every server process on the machine: each server takes an
-   `flock` on `STATE_DIR/lock` for the whole request (several Claude Code sessions share one bridge).
-   Max payload 256 KB (2200 folders).
+   exclusive lock on `STATE_DIR/lock` for the whole request (`flock` on macOS, `msvcrt.locking` on
+   Windows; several Claude Code sessions share one bridge). Max payload 256 KB.
+5. After reading the response the server deletes `REQUEST`. On Windows a replace or delete that
+   meets `RunScript` reading the file is retried for up to a second.
 
 Ops: `ping` (no code) · `run` (`code` required; `args` optional table) · `stop`.
 
 ## Bridge loop (inside Resolve, script thread)
 
-At start the bridge records every request folder already in the inbox as seen and never runs it: a
-request posted to a previous bridge instance (restart or take-over) times out on the server side
-instead of executing twice. The bridge refuses to parse or run anything if `setfenv` is unavailable.
+At start the bridge reads the id of a request file already present and marks it seen without
+running it: a request posted to a previous bridge instance (restart or take-over) times out on the
+server side instead of executing twice. The bridge refuses to parse or run anything if `setfenv` is
+unavailable.
 
 ```
-every TICK (30 ms):
-  if GetData("ClaudeMCP.CMCP_Stop") ~= "" or GetData("ClaudeMCP.CMCP_Owner") ~= session → exit
-  if bmd.fileexists(PENDING):
-    for dir in GetSubFolderList(INBOX): name = basename(dir)
-      skip if name ends ".tmp" or not id-shaped or already seen
-      chunks = GetSubFolderList(dir) → parse "NNNN-hex", sort, require contiguous 0..n-1
-      payload = hexdecode(concat) ; req = loadstring("return " .. payload) with empty env
-      validate v==1, id==name, |os.time()-ts| ≤ 120, op known, code string ≤ 256 KB
-      execute (see below) ; respond ; seen[name]=true
+every TICK (5 ms):
+  every 100 ms: if GetData("ClaudeMCP.CMCP_Stop") ~= "" or GetData("ClaudeMCP.CMCP_Owner") ~= session → exit
+  if bmd.fileexists(REQUEST):
+    SetPrefs(KEY, "") ; RunScript(REQUEST) ; poll GetPrefs(KEY) every 1 ms, up to 2 s ; SetPrefs(KEY, "")
+    split "<id>:<hex>" ; skip if id not id-shaped or already seen
+    payload = hexdecode(hex) ; req = loadstring("return " .. payload) with empty env
+    validate v==1, id matches, |os.time()-ts| ≤ 120, op known, code string ≤ 256 KB
+    execute (see below) ; respond ; seen[id]=true
   every 15 s: SetData("ClaudeMCP.CMCP_Beat", os.time()); 10 s after a response: SetData("ClaudeMCP.CMCP_Resp", "")
-  if PENDING exists but nothing new is behind it: scan only 4x per second (a server died mid-request)
+  if REQUEST holds an id already seen for more than 5 checks in a row: re-read it only 4x per second
 ```
+
+`KEY` is `Global.ClaudeMCP.Request`. It is cleared right after reading so the next `SetData`, which
+saves every pref to disk, never writes a request into `Fusion.prefs`. An already-seen request file
+is normal for a check or two after each answer, until the server deletes it.
 
 Execution of `run`: `fn = loadstring(code, "=claude")`, `setfenv(fn, env)` where `env` has
 `print` (captured), `resolve`, `fusion`, `fu`, `app`, `bmd`, `args`, plus fresh helpers
@@ -82,15 +102,24 @@ Other keys (same `ClaudeMCP.*` namespace in `Fusion.prefs` under `Global.Script.
 
 ## Server wait
 
-After creating `PENDING`, the server polls `PREFS` every 15 ms (stat first; parse on change) for
-`CMCP_Resp = "<id>:<hex>"` whose id matches, decodes hex → JSON, then deletes `INBOX/<id>` and
-`PENDING`. Timeout (default 30 s, per-call) → error; the folder is still deleted. On startup the
-server removes request folders older than 5 minutes (under the lock) and PENDING only when none remain.
-On exit the bridge clears `CMCP_Resp`, except the acknowledgement of an `op=stop` request. Liveness: `CMCP_Session.state == "running"` and (`CMCP_Beat` within 45 s
-or a 3 s `ping` succeeds); the bridge's `pid` must be a live process.
+After writing `REQUEST`, the server polls `PREFS` every 5 ms (stat first; parse on change) for
+`CMCP_Resp = "<id>:<hex>"` whose id matches, decodes hex → JSON, then deletes `REQUEST`. Timeout
+(default 30 s, per-call) → error; the file is still deleted. On startup the server removes inbox
+entries older than 5 minutes under the lock (a request file, or folders and `PENDING` left by a 0.2
+server). On Windows the server opens `Fusion.prefs` with delete sharing, so a poll never makes
+Resolve's save of the file fail.
+On exit the bridge clears `CMCP_Resp`, except the acknowledgement of an `op=stop` request. Liveness:
+`CMCP_Session.state == "running"`, `CMCP_Session.bridge` equal to the server's version, and
+(`CMCP_Beat` within 45 s or a 3 s `ping` succeeds); the bridge's `pid` must be a live process.
 
 ## Why these constants
 
-`TICK` 30 ms + prefs flush ≈ 0.3 s observed → typical round trip 0.1–0.4 s. Stale window 120 s
-guards against replaying a folder left by a crashed server. `PENDING` keeps the idle loop to one
-`stat` per tick instead of a directory listing.
+Measured on Windows with free 21.2.0.6: `fu:RunScript` returns in about 0.4 ms and the pref it sets
+is readable about 2 ms later, `SetData` takes about 6 ms, `bmd.fileexists` about 30 µs and `GetData`
+about 0.1 ms. A request costs the wait for the next tick, one `RunScript` and one `SetData`. The 0.2
+channel needed two `GetSubFolderList` calls per request instead, at about 18 ms each whatever the
+folder held. With `TICK` 5 ms an idle tick is one `fileexists`; the two `GetData` calls for stop and
+take-over run every 100 ms. Measured round trip for a small request: median 22 ms, p99 44 ms over 300
+calls (upstream's channel: median 84 ms, 107 ms back to back). While Resolve's main thread is busy
+with UI work, calls can take two or three times as long. Stale window 120 s guards against replaying a request left by a crashed
+server.

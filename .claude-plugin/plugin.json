@@ -1,10 +1,10 @@
 {
   "name": "davinci-resolve",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Drive the free edition of DaVinci Resolve 21.1 from Claude Code through a Lua bridge: 33 MCP tools plus run_lua, a Resolve skill, and a /davinci-resolve:setup command.",
   "author": { "name": "kingjames", "url": "https://github.com/kingjamesch" },
-  "homepage": "https://github.com/kingjamesch/davinci-resolve-mcp",
-  "repository": "https://github.com/kingjamesch/davinci-resolve-mcp",
+  "homepage": "https://github.com/Inkapa/davinci-resolve-mcp",
+  "repository": "https://github.com/Inkapa/davinci-resolve-mcp",
   "license": "MIT",
   "keywords": ["davinci-resolve", "mcp", "video-editing", "lua", "claude-code"],
   "mcpServers": {

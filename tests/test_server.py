@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -278,7 +279,7 @@ class ProcessTests(unittest.TestCase):
         ]
         stdin = "".join(json.dumps(m) + "\n" for m in lines).encode("utf-8")
         proc = subprocess.run(
-            ["/usr/bin/python3", os.path.join(ROOT, "server.py")],
+            [sys.executable, os.path.join(ROOT, "server.py")],
             input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, cwd=ROOT)
         self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
         out = [json.loads(line) for line in proc.stdout.decode("utf-8").splitlines() if line.strip()]

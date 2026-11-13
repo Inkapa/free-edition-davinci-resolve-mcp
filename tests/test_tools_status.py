@@ -6,7 +6,7 @@ import unittest
 from davinci_mcp.tools import TOOLS, ToolError, validate_args
 from davinci_mcp.tools import status  # noqa: F401  (registers the tools)
 
-FUSCRIPT = "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fuscript"
+from davinci_mcp.paths import FUSCRIPT
 
 EXPECTED = {
     "resolve_status": True, "open_page": False, "list_projects": True, "open_project": False,
@@ -67,7 +67,7 @@ class StatusToolsTest(unittest.TestCase):
                 fh.write(code)
                 path = fh.name
             try:
-                out = subprocess.run([FUSCRIPT, "-l", "lua", "-x", "assert(loadfile('%s')); print('ok')" % path],
+                out = subprocess.run([FUSCRIPT, "-l", "lua", "-x", "assert(loadfile('%s')); print('ok')" % path.replace("\\", "/")],
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      universal_newlines=True, timeout=60)
                 self.assertIn("ok", out.stdout, "%s: %s %s" % (name, out.stdout, out.stderr))

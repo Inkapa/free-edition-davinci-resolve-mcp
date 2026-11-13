@@ -28,8 +28,9 @@ class InstallTests(unittest.TestCase):
         with open(os.path.join(ROOT, "bridge", install.STOP)) as a, \
                 open(os.path.join(self.scripts, install.STOP)) as b:
             self.assertEqual(a.read(), b.read())
-        for d in (self.state, os.path.join(self.state, "inbox")):
-            self.assertEqual(stat.S_IMODE(os.stat(d).st_mode), 0o700)
+        if os.name != "nt":  # Windows has no POSIX modes; the folder inherits its parent's ACLs
+            for d in (self.state, os.path.join(self.state, "inbox")):
+                self.assertEqual(stat.S_IMODE(os.stat(d).st_mode), 0o700)
 
     def test_desktop_config_preserves_keys_and_backs_up(self):
         path = os.path.join(self.tmp, "cfg.json")
@@ -42,7 +43,7 @@ class InstallTests(unittest.TestCase):
         cfg = json.loads(raw)
         self.assertEqual(list(cfg.keys()), ["zeta", "mcpServers", "alpha"])
         self.assertEqual(cfg["mcpServers"]["other"], {"command": "x"})
-        self.assertEqual(cfg["mcpServers"]["davinci"]["command"], "/usr/bin/python3")
+        self.assertEqual(cfg["mcpServers"]["davinci"]["command"], install.PYTHON)
         self.assertEqual(cfg["mcpServers"]["davinci"]["args"], [os.path.join(ROOT, "server.py")])
         backups = [f for f in os.listdir(self.tmp) if f.startswith("cfg.json.bak-")]
         self.assertEqual(len(backups), 1)
@@ -75,14 +76,15 @@ class InstallTests(unittest.TestCase):
         self.assertTrue(rep["bridge_installed"])
         self.assertTrue(rep["stamp_matches"])
         self.assertTrue(rep["stop_script_present"])
-        self.assertEqual(rep["state_dir_mode"], "0o700")
+        if os.name != "nt":
+            self.assertEqual(rep["state_dir_mode"], "0o700")
         self.assertIsNone(rep["claude_registered"])
 
     def test_register_without_claude(self):
         with mock.patch("shutil.which", return_value=None):
             ok, msg = install.register_claude_code(ROOT)
         self.assertFalse(ok)
-        self.assertIn("claude mcp add --scope user davinci -- /usr/bin/python3 "
+        self.assertIn("claude mcp add --scope user davinci -- " + install.PYTHON + " "
                       + os.path.join(ROOT, "server.py"), msg)
 
 

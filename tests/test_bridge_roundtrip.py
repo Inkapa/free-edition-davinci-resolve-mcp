@@ -6,9 +6,9 @@ import time
 import unittest
 
 from davinci_mcp import luafmt, prefs
-from davinci_mcp.transport import BridgeClient, LuaError
+from davinci_mcp.transport import REQUEST_KEY, BridgeClient, LuaError
 
-FUSCRIPT = "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fuscript"
+from davinci_mcp.paths import FUSCRIPT
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HARNESS = os.path.join(ROOT, "tests", "lua_harness.lua")
 BRIDGE = os.path.join(ROOT, "bridge", "Claude_MCP_Bridge.lua")
@@ -108,10 +108,8 @@ class BridgeRoundTrip(unittest.TestCase):
 
     def test_08_malformed_request(self):
         req_id = "badreq01"
-        folder = os.path.join(self.state, "inbox", req_id)
-        os.makedirs(os.path.join(folder, "0000-zz"))
-        with open(os.path.join(self.state, "inbox", "PENDING"), "a"):
-            pass
+        with open(self.client.request_file, "w") as fh:
+            fh.write('fu:SetPrefs("%s", "%s:zz")\n' % (REQUEST_KEY, req_id))
         env = None
         deadline = time.time() + 5
         try:
@@ -123,11 +121,7 @@ class BridgeRoundTrip(unittest.TestCase):
                     break
                 time.sleep(0.02)
         finally:
-            shutil.rmtree(folder, ignore_errors=True)
-            try:
-                os.remove(os.path.join(self.state, "inbox", "PENDING"))
-            except OSError:
-                pass
+            self.client._cleanup(req_id)
         self.assertIsNotNone(env, "no response to malformed request within 5 s")
         self.assertIs(env.get("ok"), False)
 

@@ -2,6 +2,10 @@
 
 Status: v0.1 design record, 2026-10-31. Owner: King James. Mode: PROVIDE-MCP (local stdio).
 
+> This fork's 0.3.0 replaced the request channel described below (folders read with
+> `GetSubFolderList`) with one file run by `fu:RunScript`. See [PROTOCOL.md](PROTOCOL.md) for the
+> current wire format; the rest of this record still applies.
+
 ## 0. Where it runs, as whom
 
 - **Local stdio server** on the user's Mac, started by Claude Code (`claude mcp add --scope user`).

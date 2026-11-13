@@ -1,23 +1,66 @@
-# davinci-resolve-mcp
+# davinci-resolve-mcp (Windows fork)
 
-[![test](https://github.com/kingjamesch/davinci-resolve-mcp/actions/workflows/test.yml/badge.svg)](https://github.com/kingjamesch/davinci-resolve-mcp/actions/workflows/test.yml)
+Let Claude Code drive the free edition of DaVinci Resolve 21.1 and 21.2 on Windows, as well as on macOS.
 
-Let Claude Code drive the free edition of DaVinci Resolve 21.1.
+This is a fork of [kingjamesch/davinci-resolve-mcp](https://github.com/kingjamesch/davinci-resolve-mcp), which only runs on macOS. It keeps upstream's 33 tools, request payload and response channel, adds Windows support, and replaces the way requests reach Resolve with a faster one. Use the server and the bridge from the same release: the server refuses a bridge from another release and tells you to reinstall.
 
-Resolve 21.1 free removed Python scripts from the Workspace > Scripts menu and blocks external scripting. Lua menu scripts still run. This project uses that gap. A Lua bridge runs inside Resolve and a tiny Python MCP server runs outside. The server sends Lua to the bridge, the bridge runs it against the live `resolve` object and sends the answer back. A call takes about 80 to 95 ms as measured. There are 33 tools, plus `run_lua` for anything the named tools do not cover.
+## Who this is for
+
+You use the free edition of DaVinci Resolve 21.1 or later on Windows and want Claude Code to control it.
+
+Since 21.1, the free edition no longer lists Python scripts in Workspace > Scripts and refuses external scripting connections, so Python-based Resolve MCP servers cannot reach it. On 21.2 the free edition also dropped `loadfile`, `dofile`, `fusion:SavePrefs` and `fusion:LoadPrefs` from the Lua sandbox, which breaks the bridges that read requests or write answers with them. What still works on free 21.2 is running a Lua file with `fu:RunScript`, sharing in-memory prefs with it, and writing answers with `fu:SetData`, which saves `Fusion.prefs`. This fork runs on those three calls.
+
+If you have Resolve Studio, Blackmagic's own MCP server and the Python-based servers already work and you do not need this.
+
+## What this fork changes
+
+- Requests reach Resolve as one file, `inbox/request.lua`, which the bridge runs with `fu:RunScript`. Upstream hex-encodes each request into folder names and reads them with two `MediaStorage:GetSubFolderList` calls, which cost about 18 ms each on Windows. Answers still go through `fu:SetData`.
+- The bridge checks for a request every 5 ms instead of 30 ms (one `bmd.fileexists`, about 30 µs) and checks for stop or take-over every 100 ms. The server polls for the answer every 5 ms instead of 15 ms.
+- The server checks the bridge's version and refuses a bridge from another release, instead of timing out.
+- Every per-platform path (Resolve's support folder, `Fusion.prefs`, the Scripts folder, the scripting docs, the Claude Desktop config, `fuscript`) lives in `davinci_mcp/paths.py`, with Windows and macOS values.
+- The cross-process request lock uses `msvcrt` on Windows instead of `flock`.
+- The bridge liveness check asks the Windows process table for Resolve's pid. `os.kill(pid, 0)` would send Ctrl+C on Windows.
+- `Fusion.prefs` is read with delete sharing on Windows, so a poll never makes Resolve's save of the file fail.
+- `resolve_status` finds Resolve with `tasklist` on Windows.
+- The installer registers the Python that runs it, and calls the `claude` CLI by its full path (it is a `.cmd` shim on Windows).
+- The Lua bridge builds its paths with backslashes when the stamped state directory is a Windows path, and falls back to `%APPDATA%` when `HOME` is unset.
+- The tests run on Windows: Lua paths use forward slashes, POSIX mode checks are skipped, and the offline harness fakes `RunScript` and the in-memory prefs.
+
+Measured on Windows 11 with DaVinci Resolve 21.2.0.6 free and Python 3.13. The new request channel has not been tried on macOS yet; if `fu:RunScript` is missing there, use upstream on macOS.
+
+## How it works in short
+
+Resolve 21.1 free removed Python scripts from the Workspace > Scripts menu and blocks external scripting. Lua menu scripts still run. This project uses that gap. A Lua bridge runs inside Resolve and a tiny Python MCP server runs outside. The server sends Lua to the bridge, the bridge runs it against the live `resolve` object and sends the answer back. A small call takes about 20 to 30 ms (measured on Windows with free 21.2, median 22 ms; upstream's channel took 70 to 110 ms on the same machine), and a 200 KB request about 80 ms. There are 33 tools, plus `run_lua` for anything the named tools do not cover.
 
 ## Requirements
 
-- macOS
-- DaVinci Resolve 21.1.2, free or Studio
+- macOS or Windows 10/11
+- DaVinci Resolve 21.1.2 or 21.2, free or Studio (Windows measured on free 21.2.0.6)
 - Claude Code
-- Python 3.9 or newer at `/usr/bin/python3`
+- Python 3.9 or newer: `/usr/bin/python3` on macOS; on Windows, whichever Python runs the installer
 - No pip installs. The server uses the standard library only.
 
-## Install
+## Install on Windows
+
+```powershell
+git clone https://github.com/Inkapa/davinci-resolve-mcp.git
+cd davinci-resolve-mcp
+python install.py
+```
+
+The installer does the same four things as on macOS (below), with these paths:
+
+- Lua scripts: `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\`
+- State directory: `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\ClaudeMCP`
+- Responses are read from `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Profiles\<profile>\Fusion.prefs`
+- The Claude Code registration uses the Python that ran `install.py`.
+
+`--check`, `--uninstall`, `--purge` and `--claude-desktop` work the same way. The plugin install below is macOS only.
+
+## Install on macOS
 
 ```bash
-git clone https://github.com/kingjamesch/davinci-resolve-mcp.git
+git clone https://github.com/Inkapa/davinci-resolve-mcp.git
 cd davinci-resolve-mcp
 ./install.sh
 ```
@@ -49,12 +92,12 @@ Other flags:
 | `--check` | Report what is installed. |
 | `--uninstall` | Remove the Lua scripts and the Claude Code registration. Add `--purge` to delete the state directory too. `./uninstall.sh` does the same. |
 
-## Install as a Claude Code plugin
+## Install as a Claude Code plugin (macOS)
 
-If you only use Claude Code, skip the clone. Inside Claude Code:
+If you only use Claude Code on macOS, skip the clone. Inside Claude Code:
 
 ```
-/plugin marketplace add kingjamesch/davinci-resolve-mcp
+/plugin marketplace add Inkapa/davinci-resolve-mcp
 /plugin install davinci-resolve@davinci-resolve-mcp
 /davinci-resolve:setup
 ```
@@ -67,9 +110,9 @@ Claude_MCP_Bridge. The plugin also ships a `resolve` skill with the conventions 
 Use either the plugin or `./install.sh`, not both, or Claude Code sees two `davinci` servers
 (`claude mcp remove davinci -s user` removes the clone-based one).
 
-The server is also listed on the [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=davinci-resolve-mcp)
-as `io.github.kingjamesch/davinci-resolve-mcp` for discovery. The listing is metadata only: install
-from the plugin or the clone as above, since the bridge must be placed inside Resolve by hand.
+Upstream is listed on the [MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=davinci-resolve-mcp)
+as `io.github.kingjamesch/davinci-resolve-mcp`. That listing installs upstream, not this fork, and the
+two are not interchangeable: a 0.2 bridge and a 0.3 server cannot talk to each other.
 
 ## Daily use
 
@@ -101,8 +144,8 @@ Conventions: paths are absolute, frames are integers in the timeline's own numbe
 ## How it works
 
 - Claude Code starts `server.py` over stdio. The server speaks MCP and holds no network socket.
-- To send a request, the server creates folders under the state directory. The request is hex-encoded into the folder names.
-- The Lua bridge lists those folders every 30 ms, decodes the request and runs it with the `resolve` object bound.
+- To send a request, the server writes `inbox/request.lua` under the state directory. The file holds one line that stores the hex-encoded request in an in-memory Fusion pref.
+- The Lua bridge checks for that file every 5 ms, runs it with `fu:RunScript`, reads the request from the pref, and runs it with the `resolve` object bound.
 - The bridge returns the answer with `fu:SetData`, which Resolve writes to `Fusion.prefs`. The server polls that file.
 - The last response stays in `Fusion.prefs` and is cleared about 10 seconds after it was written; the bridge also clears it when it stops.
 - Several Claude Code sessions can share one Resolve: every server takes a lock in the state directory, so requests run one at a time.
@@ -119,13 +162,13 @@ The wire format is in [docs/PROTOCOL.md](docs/PROTOCOL.md). The design record is
 
 ## Not included yet
 
-Color-page node tools, gallery and stills, Fairlight, compound and Fusion clips, keyboard and preset import or export, project archive and restore, automatic bridge start when Resolve launches, a Claude Desktop `.mcpb` package, and Windows. `run_lua` covers most of these in the meantime. Set `DAVINCI_MCP_DISABLE_RUN_LUA=1` in the server environment to remove `run_lua` from the tool list.
+Color-page node tools, gallery and stills, Fairlight, compound and Fusion clips, keyboard and preset import or export, project archive and restore, automatic bridge start when Resolve launches, a Claude Desktop `.mcpb` package, and the plugin install on Windows. `run_lua` covers most of these in the meantime. Set `DAVINCI_MCP_DISABLE_RUN_LUA=1` in the server environment to remove `run_lua` from the tool list.
 
 ## Security posture
 
 - Local only. The server opens no network port and sends no telemetry.
-- There are no credentials. The identity is your macOS user.
-- Anyone who can write to the state directory can run Lua inside Resolve as you. The directory is created with mode 0700.
+- There are no credentials. The identity is your OS user.
+- Anyone who can write to the state directory can run Lua inside Resolve as you. On macOS the directory is created with mode 0700; on Windows it inherits the ACLs of your `%APPDATA%`.
 - Destructive tools need `confirm: true`. `run_lua` is open-ended, so Claude is told to ask you before running code that deletes or overwrites.
 - Responses are size-capped. Over-cap results come back marked `truncated`.
 - `Fusion.prefs` is readable by your user and holds the last response until it is cleared.
@@ -139,6 +182,8 @@ Run the tests:
 ```bash
 /usr/bin/python3 -m unittest discover -s tests
 ```
+
+On Windows run `python -m unittest discover -s tests`. The tests that need `fuscript` look for it under `%PROGRAMFILES%`; set `DAVINCI_MCP_FUSCRIPT` to its full path when Resolve is installed elsewhere.
 
 Regenerate the tool reference after changing any tool:
 
@@ -154,7 +199,7 @@ Layout:
 server.py                  stdio entry point
 install.py, install.sh     installer, uninstaller (uninstall.sh)
 bridge/                    Lua scripts that run inside Resolve
-davinci_mcp/               server, transport, prefs parser, Lua encoder, docs index
+davinci_mcp/               server, transport, prefs parser, Lua encoder, docs index, per-OS paths
 davinci_mcp/tools/         one module per tool group
 docs/                      MCP-RECORD.md, PROTOCOL.md, TOOLS.md (generated)
 scripts/gen_tools_doc.py   generates docs/TOOLS.md

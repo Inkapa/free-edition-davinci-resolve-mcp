@@ -1,11 +1,11 @@
 """The Python half of the bridge protocol (docs/PROTOCOL.md).
 
-Requests become a folder of hex-named subfolders under ``STATE_DIR/inbox/<id>/`` plus a
-``PENDING`` flag; responses are read back from ``Fusion.prefs`` where the Lua bridge persisted
-them with ``fu:SetData``. One request in flight at a time. Python 3.9 compatible, stdlib only.
+A request is one Lua file, ``STATE_DIR/inbox/request.lua``, that stores ``<id>:<hex payload>`` in
+an in-memory Fusion pref when the bridge runs it with ``fu:RunScript``; responses are read back from
+``Fusion.prefs`` where the Lua bridge persisted them with ``fu:SetData``. One request in flight at a
+time. Python 3.9 compatible, stdlib only.
 """
 
-import fcntl
 import json
 import os
 import random
@@ -16,22 +16,36 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
-from . import luafmt, prefs
+from . import __version__, luafmt, paths, prefs
 
-STATE_DIR_DEFAULT = os.environ.get("DAVINCI_MCP_STATE_DIR") or os.path.expanduser(
-    "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/ClaudeMCP")
+if paths.WINDOWS:
+    import ctypes
+    import msvcrt
+
+    _kernel32 = ctypes.WinDLL("kernel32")
+    _kernel32.OpenProcess.restype = ctypes.c_void_p   # a HANDLE is pointer-sized
+    _kernel32.GetExitCodeProcess.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong))
+    _kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+else:
+    import fcntl
+
+STATE_DIR_DEFAULT = os.environ.get("DAVINCI_MCP_STATE_DIR") or paths.STATE_DIR
 PROFILES_DIR_DEFAULT = os.environ.get("DAVINCI_MCP_PROFILES_DIR") or None   # None -> prefs.PROFILES_DIR
-CHUNK_BYTES = 120            # 240 hex chars + "NNNN-" prefix stays well under the 255-byte name limit
-POLL_S = 0.015
+REQUEST_FILE = "request.lua"
+REQUEST_KEY = "Global.ClaudeMCP.Request"   # must match REQ_KEY in the bridge
+POLL_S = 0.005               # one stat per poll; the answer is readable within ~1 ms of the save
+SHARING_RETRY_S = 1.0        # Windows refuses to replace or delete a file while RunScript is reading it
 PING_TIMEOUT_S = 3.0
 BEAT_STALE_S = 45.0
 DEFAULT_TIMEOUT_S = 30.0
 MAX_TIMEOUT_S = 600.0
-STALE_REQUEST_S = 300.0      # startup cleanup removes only request folders older than this
+STALE_REQUEST_S = 300.0      # startup cleanup removes only inbox entries older than this
 LOCK_WAIT_S = 660.0          # another server may hold the lock for a whole long request
 RESOLVE_NOT_RUNNING = "DaVinci Resolve is not running."
 BRIDGE_NOT_RUNNING = ("The Resolve bridge is not running. In DaVinci Resolve click Workspace > "
                       "Scripts > Claude_MCP_Bridge (Resolve must be open with a project), then retry.")
+BRIDGE_OUTDATED = ("The bridge running in Resolve is version %s and this server is %s. Run install.py "
+                   "again, then click Workspace > Scripts > Claude_MCP_Bridge in Resolve.")
 
 
 class BridgeError(Exception):
@@ -68,7 +82,7 @@ class BridgeClient:
                  log: Callable[[str], None] = None, poll_s: float = POLL_S):
         self.state_dir = state_dir or STATE_DIR_DEFAULT
         self.inbox = os.path.join(self.state_dir, "inbox")
-        self.pending = os.path.join(self.inbox, "PENDING")
+        self.request_file = os.path.join(self.inbox, REQUEST_FILE)
         self.lock_path = os.path.join(self.state_dir, "lock")
         self.profiles_dir = profiles_dir or PROFILES_DIR_DEFAULT
         self.log = log or _default_log
@@ -87,36 +101,31 @@ class BridgeClient:
                 pass
 
     def startup_cleanup(self) -> int:
-        """Remove request folders left by a crashed server. Several Claude Code sessions run their own
-        server against the same bridge, so only folders older than STALE_REQUEST_S are removed, under
-        the cross-process lock, and PENDING is removed only when no request folder remains."""
+        """Remove what a crashed server left in the inbox: a request file, or the request folders and
+        PENDING flag of the 0.2 protocol. Several Claude Code sessions run their own server against
+        the same bridge, so only entries older than STALE_REQUEST_S are removed, under the
+        cross-process lock."""
         self.ensure_dirs()
         removed = 0
         now = time.time()
         with self._process_lock(self):
-            remaining = 0
             for name in os.listdir(self.inbox):
                 path = os.path.join(self.inbox, name)
-                if not os.path.isdir(path):
-                    continue
                 try:
-                    age = now - os.stat(path).st_mtime
-                except OSError:
-                    continue
-                if age > STALE_REQUEST_S:
-                    shutil.rmtree(path, ignore_errors=True)
+                    if now - os.stat(path).st_mtime <= STALE_REQUEST_S:
+                        continue
+                    if os.path.isdir(path):
+                        shutil.rmtree(path)
+                    else:
+                        os.remove(path)
                     removed += 1
-                else:
-                    remaining += 1
-            if remaining == 0:
-                try:
-                    os.remove(self.pending)
                 except OSError:
-                    pass
+                    continue
         return removed
 
     class _process_lock(object):
-        """flock on STATE_DIR/lock: one request in flight across every server process on this Mac."""
+        """Exclusive lock on STATE_DIR/lock: one request in flight across every server process on this
+        machine. flock on macOS; on Windows msvcrt locks the file's first byte."""
 
         def __init__(self, client):
             self.client = client
@@ -127,7 +136,7 @@ class BridgeClient:
             deadline = time.monotonic() + LOCK_WAIT_S
             while True:
                 try:
-                    fcntl.flock(self.fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    _lock_file(self.fh)
                     return self
                 except OSError:
                     if time.monotonic() >= deadline:
@@ -139,7 +148,7 @@ class BridgeClient:
         def __exit__(self, *exc):
             if self.fh is not None:
                 try:
-                    fcntl.flock(self.fh.fileno(), fcntl.LOCK_UN)
+                    _unlock_file(self.fh)
                 finally:
                     self.fh.close()
                     self.fh = None
@@ -189,6 +198,10 @@ class BridgeClient:
             return {"running": False, "reason": "no bridge session recorded", "session": None, "beat_age_s": beat_age}
         if sess.get("state") != "running":
             return {"running": False, "reason": "bridge session is %s" % sess.get("state"), "session": sess, "beat_age_s": beat_age}
+        if sess.get("bridge") != __version__:
+            # 0.3.0 changed the request channel, so a bridge from another release never sees a request.
+            return {"running": False, "outdated": True, "session": sess, "beat_age_s": beat_age,
+                    "reason": BRIDGE_OUTDATED % (sess.get("bridge"), __version__)}
         pid = sess.get("pid")
         if isinstance(pid, int) and pid > 0 and not _pid_alive(pid):
             return {"running": False, "reason": "the Resolve process that ran the bridge has exited", "session": sess, "beat_age_s": beat_age}
@@ -204,26 +217,22 @@ class BridgeClient:
         return (t + r).lower()
 
     def _write_request(self, req_id: str, payload: bytes) -> str:
+        """Write the request file atomically: the bridge sees either no file or a whole one."""
         self.ensure_dirs()
-        final = os.path.join(self.inbox, req_id)
-        tmp = final + ".tmp"
-        shutil.rmtree(tmp, ignore_errors=True)
-        os.mkdir(tmp, 0o700)
-        for i in range(0, len(payload), CHUNK_BYTES):
-            chunk = payload[i:i + CHUNK_BYTES]
-            os.mkdir(os.path.join(tmp, "%04d-%s" % (i // CHUNK_BYTES, chunk.hex())), 0o700)
-        os.rename(tmp, final)
-        with open(self.pending, "a"):
-            pass
-        return final
+        tmp = self.request_file + ".tmp"
+        with open(tmp, "w", encoding="ascii", newline="\n") as fh:
+            fh.write(request_script(req_id, payload))
+        _retry_sharing(lambda: os.replace(tmp, self.request_file))
+        return self.request_file
 
     def _cleanup(self, req_id: str) -> None:
-        shutil.rmtree(os.path.join(self.inbox, req_id), ignore_errors=True)
-        shutil.rmtree(os.path.join(self.inbox, req_id + ".tmp"), ignore_errors=True)
-        try:
-            os.remove(self.pending)
-        except OSError:
-            pass
+        for path in (self.request_file, self.request_file + ".tmp"):
+            try:
+                _retry_sharing(lambda: os.remove(path))
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                self.log("could not remove %s: %s" % (path, exc))
 
     def _wait_response(self, req_id: str, timeout: float) -> dict:
         deadline = time.monotonic() + timeout
@@ -261,6 +270,8 @@ class BridgeClient:
         with self._lock, self._process_lock(self):
             if precheck:
                 live = self.liveness()
+                if live.get("outdated"):
+                    raise BridgeNotRunning(live["reason"])
                 if not live["running"] and live["reason"] != "no bridge session recorded" and \
                         live["reason"] != "bridge heartbeat is %d s old" % int(live["beat_age_s"] or 0):
                     raise BridgeNotRunning(BRIDGE_NOT_RUNNING)
@@ -304,7 +315,55 @@ class BridgeClient:
             return False
 
 
+def request_script(req_id: str, payload: bytes) -> str:
+    """The request file: one line that hands ``<id>:<hex payload>`` to the bridge through an
+    in-memory pref. Only hex digits and the id go into the string, so no escaping is needed."""
+    return 'fu:SetPrefs("%s", "%s:%s")\n' % (REQUEST_KEY, req_id, payload.hex())
+
+
+def _retry_sharing(action: Callable[[], None]) -> None:
+    """Run a file replace or delete, retrying while Windows reports a sharing violation."""
+    deadline = time.monotonic() + SHARING_RETRY_S
+    while True:
+        try:
+            action()
+            return
+        except PermissionError:
+            if not paths.WINDOWS or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.002)
+
+
+def _lock_file(fh) -> None:
+    """Take the lock without blocking; raises OSError when another process holds it."""
+    if paths.WINDOWS:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_file(fh) -> None:
+    if paths.WINDOWS:
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
 def _pid_alive(pid: int) -> bool:
+    if paths.WINDOWS:
+        # os.kill(pid, 0) on Windows sends CTRL_C_EVENT, so ask the process table instead.
+        process_query_limited_information = 0x1000
+        still_active = 259
+        handle = _kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            return bool(_kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == still_active
+        finally:
+            _kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

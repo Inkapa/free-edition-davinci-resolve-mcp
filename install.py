@@ -7,17 +7,12 @@ import stat
 import subprocess
 import sys
 
+from davinci_mcp.paths import DESKTOP_CONFIG, PYTHON, SCRIPTS_UTILITY, STATE_DIR
+
 TOKEN = "@@STATE_DIR@@"
 BRIDGE = "Claude_MCP_Bridge.lua"
 STOP = "Claude_MCP_Bridge_Stop.lua"
-PYTHON = "/usr/bin/python3"
 SERVER_NAME = "davinci"
-
-_SUPPORT = os.path.expanduser("~/Library/Application Support")
-_RESOLVE = os.path.join(_SUPPORT, "Blackmagic Design", "DaVinci Resolve")
-SCRIPTS_UTILITY = os.path.join(_RESOLVE, "Fusion", "Scripts", "Utility")
-STATE_DIR = os.path.join(_RESOLVE, "ClaudeMCP")
-DESKTOP_CONFIG = os.path.join(_SUPPORT, "Claude", "claude_desktop_config.json")
 
 NEXT_STEPS = (
     "NEXT STEPS\n"
@@ -26,6 +21,13 @@ NEXT_STEPS = (
     "Claude_MCP_Bridge_Stop stops it).\n"
     "3) In Claude Code run /mcp and check that 'davinci' is connected, then ask for resolve_status."
 )
+
+
+def _clean_dir(path):
+    """Absolute path without a trailing separator (the root stays as it is)."""
+    path = os.path.abspath(path)
+    stripped = path.rstrip("/\\")
+    return path if not stripped or stripped.endswith(":") else stripped
 
 
 def _server_path(repo_dir):
@@ -38,7 +40,7 @@ def _add_command(repo_dir, scope="user"):
 
 def install(repo_dir, scripts_dir, state_dir):
     actions = []
-    state_dir = os.path.abspath(state_dir).rstrip("/") or "/"
+    state_dir = _clean_dir(state_dir)
     os.makedirs(scripts_dir, exist_ok=True)
     actions.append("ensured " + scripts_dir)
     inbox = os.path.join(state_dir, "inbox")
@@ -69,6 +71,8 @@ def install(repo_dir, scripts_dir, state_dir):
 
 
 def _run(cmd):
+    # On Windows the claude CLI is a .cmd shim that CreateProcess finds only by its full path.
+    cmd = [shutil.which(cmd[0]) or cmd[0]] + list(cmd[1:])
     return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           universal_newlines=True, timeout=60)
 
@@ -122,7 +126,7 @@ def configure_claude_desktop(config_path, repo_dir):
 
 
 def check(repo_dir, scripts_dir, state_dir):
-    state_dir = os.path.abspath(state_dir).rstrip("/") or "/"
+    state_dir = _clean_dir(state_dir)
     report = {}
     bridge = os.path.join(scripts_dir, BRIDGE)
     report["bridge_installed"] = os.path.isfile(bridge)

@@ -3,7 +3,7 @@
 import subprocess
 
 from . import READ_ONLY, WRITE, WRITE_IDEMPOTENT, lua_tool, register
-from .. import transport
+from .. import paths, transport
 from ..transport import BridgeError
 
 STATUS_DESCRIPTION = (
@@ -13,15 +13,19 @@ STATUS_DESCRIPTION = (
     "project open) and call this again."
 )
 
-_RESOLVE_PROCESS = "DaVinci Resolve.app/Contents/MacOS/Resolve"
-
-
 def _resolve_running():
+    if paths.WINDOWS:
+        cmd = ["tasklist", "/FI", "IMAGENAME eq %s" % paths.RESOLVE_IMAGE, "/NH", "/FO", "CSV"]
+    else:
+        cmd = ["pgrep", "-f", paths.RESOLVE_IMAGE]
     try:
-        out = subprocess.run(["pgrep", "-f", _RESOLVE_PROCESS], stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, timeout=5)
+        out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5,
+                             universal_newlines=True)
     except (OSError, subprocess.SubprocessError):
         return None
+    if paths.WINDOWS:
+        # tasklist exits 0 either way and prints an INFO line when nothing matches.
+        return paths.RESOLVE_IMAGE.lower() in out.stdout.lower()
     return out.returncode == 0 and bool(out.stdout.strip())
 
 

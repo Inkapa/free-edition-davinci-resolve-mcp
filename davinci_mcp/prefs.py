@@ -10,8 +10,14 @@ import os
 import re
 from typing import Dict, Optional, Tuple
 
-PROFILES_DIR = os.path.expanduser(
-    "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Profiles")
+from .paths import PROFILES_DIR, WINDOWS
+
+if WINDOWS:
+    import ctypes
+    import msvcrt
+
+    _create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    _create_file.restype = ctypes.c_void_p   # a HANDLE is pointer-sized
 PREFS_FILE_NAME = "Fusion.prefs"
 KEYS = ("CMCP_Resp", "CMCP_Session", "CMCP_Owner", "CMCP_Beat", "CMCP_Stop")
 _KEY_RES = {k: re.compile(r"\b" + k + r' = "([^"\r\n]*)"') for k in KEYS}
@@ -47,10 +53,28 @@ def file_signature(path: str) -> Optional[Tuple[int, int, int]]:
 
 def read_text(path: str) -> Optional[str]:
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        with _open_shared(path) as fh:
             return fh.read()
     except OSError:
         return None
+
+
+def _open_shared(path: str):
+    """Open for reading without blocking a writer that replaces or deletes the file.
+
+    Windows' default open() denies delete sharing, so a poll that overlaps a save makes the save
+    fail and the response is lost. Opening through CreateFileW with FILE_SHARE_DELETE avoids that.
+    """
+    if not WINDOWS:
+        return open(path, "r", encoding="utf-8", errors="replace")
+    generic_read = 0x80000000
+    share_all = 0x1 | 0x2 | 0x4   # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+    open_existing = 3
+    handle = _create_file(path, generic_read, share_all, None, open_existing, 0, None)
+    if handle is None or handle == ctypes.c_void_p(-1).value:
+        raise OSError(ctypes.get_last_error(), "cannot open " + path)
+    fd = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+    return open(fd, "r", encoding="utf-8", errors="replace")
 
 
 def extract_keys(text: str) -> Dict[str, str]:

@@ -2,9 +2,8 @@
 -- usage: fuscript -l lua tests/lua_harness.lua <state_dir> <prefs_file> <max_ticks> <bridge_path>
 local state_dir, prefs_file, max_ticks, bridge_path = arg[1], arg[2], arg[3], arg[4]
 
-local function shell_quote(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
-
 local PREFIX = "ClaudeMCP."
+local WINDOWS = package.config:sub(1, 1) == "\\"
 local store, order = {}, {}
 
 local function write_prefs()
@@ -17,11 +16,13 @@ local function write_prefs()
   lines[#lines + 1] = "\t\t}"
   lines[#lines + 1] = "\t}"
   lines[#lines + 1] = "}"
-  local tmp = prefs_file .. ".tmp"
-  local fh = assert(io.open(tmp, "w"))
+  -- Windows cannot rename onto a file another process has open, so write in place there;
+  -- the server re-reads whenever the file's signature changes.
+  local target = WINDOWS and prefs_file or (prefs_file .. ".tmp")
+  local fh = assert(io.open(target, "w"))
   fh:write(table.concat(lines, "\n"), "\n")
   fh:close()
-  assert(os.rename(tmp, prefs_file))
+  if not WINDOWS then assert(os.rename(target, prefs_file)) end
 end
 
 local FU = {}
@@ -36,14 +37,17 @@ function FU.GetData(self, key)
   return store[short]
 end
 
-local media_storage = {}
-function media_storage.GetSubFolderList(self, dir)
-  local out = {}
-  local p = io.popen('find ' .. shell_quote(dir) .. ' -mindepth 1 -maxdepth 1 -type d 2>/dev/null')
-  if not p then return out end
-  for line in p:lines() do out[#out + 1] = line end
-  p:close()
-  return out
+-- In-memory prefs, which Resolve shares between the bridge and the scripts it runs.
+local mem_prefs = {}
+function FU.SetPrefs(self, key, value) mem_prefs[key] = value end
+function FU.GetPrefs(self, key) return mem_prefs[key] end
+-- Resolve queues the file on its script executor; running it at once is the same as far as the
+-- bridge can tell, since it polls GetPrefs either way.
+function FU.RunScript(self, path)
+  local chunk = loadfile(path)
+  if not chunk then return end
+  setfenv(chunk, { fu = FU })
+  pcall(chunk)
 end
 
 local timeline = { GetName = function() return "Timeline 1" end }
@@ -59,7 +63,6 @@ local fake_resolve = {
   GetVersionString = function() return "21.1.2.10" end,
   GetCurrentPage = function() return "edit" end,
   GetProjectManager = function() return project_manager end,
-  GetMediaStorage = function() return media_storage end,
 }
 
 write_prefs()

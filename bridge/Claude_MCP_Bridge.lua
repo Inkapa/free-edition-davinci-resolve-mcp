@@ -1,19 +1,24 @@
--- Claude_MCP_Bridge.lua  v0.2.0
+-- Claude_MCP_Bridge.lua  v0.3.0
 -- The in-Resolve half of davinci-resolve-mcp. Launch from DaVinci Resolve:
 --   Workspace > Scripts > Claude_MCP_Bridge      (start / take over)
 --   Workspace > Scripts > Claude_MCP_Bridge_Stop (stop)
--- It polls a request folder (docs/PROTOCOL.md), runs the Lua chunk a request carries against
--- the live `resolve` object, and answers through fu:SetData, which Resolve persists to
--- Fusion.prefs. It runs on Resolve's script thread (the UI stays responsive), needs no
--- dependencies, never opens UI, never deletes files, and exits on stop or take-over.
+-- It watches for a request file (docs/PROTOCOL.md), runs it with fu:RunScript to collect the
+-- request it carries, runs that request's Lua chunk against the live `resolve` object, and answers
+-- through fu:SetData, which Resolve persists to Fusion.prefs. It runs on Resolve's script thread
+-- (the UI stays responsive), needs no dependencies, never opens UI, never deletes files, and exits
+-- on stop or take-over.
 -- JSON encoder and several measured host facts adapted from saadk408/davinci-resolve-lua-mcp (MIT).
 
-local VERSION = "0.2.0"
+local VERSION = "0.3.0"
 local BRIDGE = "davinci-resolve-mcp bridge v" .. VERSION
 local CFG = rawget(_G, "CMCP_CONFIG") or {}          -- test harness overrides (see tests/lua_harness.lua)
 local STATE_DIR_STAMP = [==[@@STATE_DIR@@]==]         -- install.py stamps the absolute state dir here
 local PREFIX = "ClaudeMCP."                           -- fu:SetData namespace -> Global.Script.GlobalData.ClaudeMCP.*
-local TICK = CFG.tick or 0.03                         -- seconds between PENDING polls
+local REQ_KEY = "Global.ClaudeMCP.Request"            -- in-memory pref the request file sets to "<id>:<hex>"
+local TICK = CFG.tick or 0.005                        -- seconds between request-file checks; one check is ~30 us
+local CONTROL_EVERY = 0.1                             -- seconds between stop / take-over checks (two GetData calls)
+local REQ_WAIT = 2                                    -- seconds to wait for RunScript to deliver a request
+local REQ_RERUN = 0.05                                -- queue RunScript again after this long without a value
 local BEAT_EVERY = CFG.beat_every or 15               -- idle heartbeat period (s)
 local RESP_CLEAR_AFTER = 10                           -- clear a consumed response from prefs after this many idle seconds
 local STALE_S = 120                                   -- requests older than this are refused
@@ -52,7 +57,6 @@ local function file_exists(path) return bmd_call("fileexists", path) == true end
 local function ms_since(t0) return math.floor((now() - t0) * 1000 + 0.5) end
 local function pack(...) return { n = select("#", ...), ... } end
 local function clamp(n, lo, hi) if n ~= n or n < lo then return lo elseif n > hi then return hi end return n end
-local function basename(p) return (tos(p):gsub("[/\\]+$", "")):match("([^/\\]+)$") or "" end
 
 -- Hex ------------------------------------------------------------------------------------------
 
@@ -274,9 +278,12 @@ local function acquire_fusion()
   if CFG.fusion then return CFG.fusion end
   for _, name in ipairs({ "fusion", "fu", "app" }) do
     local obj = rawget(_G, name)
-    if is_api_object(obj) and has_method(obj, "SetData") and has_method(obj, "GetData") then return obj end
+    if is_api_object(obj) and has_method(obj, "SetData") and has_method(obj, "GetData")
+        and has_method(obj, "SetPrefs") and has_method(obj, "GetPrefs") and has_method(obj, "RunScript") then
+      return obj
+    end
   end
-  return nil, "no fusion object with SetData/GetData"
+  return nil, "no fusion object with SetData/GetData/SetPrefs/GetPrefs/RunScript"
 end
 
 local function resolve_state_dir()
@@ -286,7 +293,11 @@ local function resolve_state_dir()
   if type(home) == "string" and #home > 0 then
     return home .. "/Library/Application Support/Blackmagic Design/DaVinci Resolve/ClaudeMCP"
   end
-  return nil, "cannot locate the state directory (HOME unset and no stamp)"
+  local appdata = os.getenv("APPDATA")
+  if type(appdata) == "string" and #appdata > 0 then
+    return appdata .. "\\Blackmagic Design\\DaVinci Resolve\\Support\\ClaudeMCP"
+  end
+  return nil, "cannot locate the state directory (HOME and APPDATA unset and no stamp)"
 end
 
 -- Prefs channel (the only SetData/GetData call sites) ---------------------------------------------
@@ -316,29 +327,39 @@ local function valid_id(id)
   return type(id) == "string" and #id >= ID_MIN and #id <= ID_MAX and id:match("^[a-z0-9]+$") ~= nil
 end
 
--- Reassemble a request folder: subfolders "NNNN-<hex>" sorted by NNNN, contiguous from 0.
-local function read_payload(st, dir)
-  local ok, list = pcall(function() return st.media_storage:GetSubFolderList(dir) end)
-  if not ok or type(list) ~= "table" then return nil, "cannot list request folder" end
-  local chunks, count = {}, 0
-  for _, p in ipairs(list) do
-    local idx, h = basename(p):match("^(%d+)%-(%x+)$")
-    if idx then
-      local i = tonumber(idx)
-      if chunks[i] ~= nil then return nil, "duplicate chunk " .. idx end
-      chunks[i] = h
-      count = count + 1
-    end
+-- Run the request file and collect what it left in the in-memory prefs: "<id>:<hex payload>".
+-- fu:RunScript queues the file on Fusion's script executor, so the value appears a moment later
+-- (2 ms for a small request, 22 ms for 400 KB of hex, measured). If the server deletes the file
+-- before the queued run reads it (it does once it has an answer), nothing arrives: stop waiting as
+-- soon as the file is gone, and queue the run again while it is still there. A repeated run only sets
+-- the same value again. The pref is cleared at the end so the next SetData save of Fusion.prefs never
+-- writes a request to disk. Returns id, hex body, or nil, nil, error.
+local function read_request(st)
+  local fusion = st.fusion
+  local function run_file()
+    return pcall(function() return fusion:RunScript(st.request_file) end)
   end
-  if count == 0 then return nil, "empty request folder" end
-  local parts, total = {}, 0
-  for i = 0, count - 1 do
-    if chunks[i] == nil then return nil, "missing chunk " .. i end
-    parts[#parts + 1] = chunks[i]
-    total = total + #chunks[i]
-    if total > MAX_PAYLOAD * 2 then return nil, "payload over " .. MAX_PAYLOAD .. " bytes" end
+  pcall(function() fusion:SetPrefs(REQ_KEY, "") end)
+  local ok, err = run_file()
+  if not ok then return nil, nil, "RunScript: " .. tos(err) end
+  local t0, last_run, value = now(), now(), ""
+  while now() - t0 < REQ_WAIT do
+    local okg, v = pcall(function() return fusion:GetPrefs(REQ_KEY) end)
+    if okg and type(v) == "string" and #v > 0 then value = v; break end
+    if not file_exists(st.request_file) then break end
+    if now() - last_run >= REQ_RERUN then run_file(); last_run = now() end
+    wait(0.001)
   end
-  local payload = unhex(table.concat(parts))
+  pcall(function() fusion:SetPrefs(REQ_KEY, "") end)
+  if value == "" then return nil, nil, "the request file set no request" end
+  local id, body = value:match("^([^:]*):(.*)$")
+  if not id then return nil, nil, "request has no id" end
+  return id, body
+end
+
+local function decode_payload(body)
+  if #body > MAX_PAYLOAD * 2 then return nil, "payload over " .. MAX_PAYLOAD .. " bytes" end
+  local payload = unhex(body)
   if not payload then return nil, "payload is not valid hex" end
   return payload
 end
@@ -450,9 +471,9 @@ local function respond(st, id, text)
 end
 
 -- Returns "stopped" when the request asked us to exit, else nil.
-local function handle(st, name, dir)
+local function handle(st, name, body)
   local f = { id = name, session = st.session, op = "" }
-  local payload, perr = read_payload(st, dir)
+  local payload, perr = decode_payload(body)
   local req, rerr
   if payload then req, rerr = parse_request(payload) end
   local text
@@ -509,8 +530,8 @@ local function start()
     set_data(st, "CMCP_Session", session_json(st, "error", { error = err }))
     return nil, err
   end
-  st.inbox = st.state_dir .. "/inbox"
-  st.pending = st.inbox .. "/PENDING"
+  local sep = st.state_dir:find("\\", 1, true) and "\\" or "/"   -- Windows stamps use backslashes
+  st.request_file = st.state_dir .. sep .. "inbox" .. sep .. "request.lua"
   st.pid = tonumber(bmd_call("getpid")) or -1
   local uuid = bmd_call("createuuid")
   if type(uuid) == "string" then uuid = uuid:gsub("[^%w]", ""):lower() end
@@ -518,20 +539,12 @@ local function start()
   st.session = uuid:sub(1, ID_MAX)
   st.product = call_string(st.resolve, "GetProductName")
   st.version = call_string(st.resolve, "GetVersionString")
-  local okms, ms = pcall(function() return st.resolve:GetMediaStorage() end)
-  if not okms or not is_api_object(ms) then
-    set_data(st, "CMCP_Session", session_json(st, "error", { error = "no MediaStorage object" }))
-    return nil, "no MediaStorage object"
-  end
-  st.media_storage = ms
-  -- Requests already in the inbox belong to a previous bridge (restart or take-over). They are
+  -- A request file already present belongs to a previous bridge (restart or take-over). Its id is
   -- remembered, never run: a write must not execute twice. The waiting server times out instead.
-  pcall(function()
-    for _, dir in ipairs(st.media_storage:GetSubFolderList(st.inbox) or {}) do
-      local name = basename(dir)
-      if valid_id(name) then remember(st, name) end
-    end
-  end)
+  if file_exists(st.request_file) then
+    local id = read_request(st)
+    if id then remember(st, id) end
+  end
   set_data(st, "CMCP_Stop", "")
   set_data(st, "CMCP_Owner", st.session)
   set_data(st, "CMCP_Resp", "")
@@ -541,40 +554,40 @@ local function start()
   return st
 end
 
-local function scan(st)
-  local ok, list = pcall(function() return st.media_storage:GetSubFolderList(st.inbox) end)
-  if not ok or type(list) ~= "table" then return nil end
-  for _, dir in ipairs(list) do
-    local name = basename(dir)
-    if valid_id(name) and not st.seen[name] then
-      remember(st, name)
-      local okh, action = pcall(handle, st, name, dir)
-      if not okh then
-        st.last_error = "handle: " .. tos(action)
-        pcall(respond, st, name, envelope_json({ id = name, session = st.session, ok = false, error = "bridge error: " .. tos(action) }, "null"))
-      elseif action then
-        return action
-      end
-    end
+local function poll_request(st)
+  local name, body, err = read_request(st)
+  if not name then st.last_error = err; return nil end
+  if not valid_id(name) or st.seen[name] then return nil end
+  remember(st, name)
+  local okh, action = pcall(handle, st, name, body)
+  if not okh then
+    st.last_error = "handle: " .. tos(action)
+    pcall(respond, st, name, envelope_json({ id = name, session = st.session, ok = false, error = "bridge error: " .. tos(action) }, "null"))
+    return nil
   end
-  return nil
+  return action
 end
 
 local function run_loop(st, max_ticks)
   local ticks = 0
+  local stale = 0
   while true do
     if max_ticks and ticks >= max_ticks then return "ticks" end
     ticks = ticks + 1
     wait(TICK)
-    if get_data(st, "CMCP_Stop") ~= "" then return "stop-flag" end
-    if get_data(st, "CMCP_Owner") ~= st.session then return "takeover" end
-    if file_exists(st.pending) and now() >= (st.next_scan_at or 0) then
+    if now() >= (st.next_control_at or 0) then
+      if get_data(st, "CMCP_Stop") ~= "" then return "stop-flag" end
+      if get_data(st, "CMCP_Owner") ~= st.session then return "takeover" end
+      st.next_control_at = now() + CONTROL_EVERY
+    end
+    if file_exists(st.request_file) and now() >= (st.next_scan_at or 0) then
       local before = st.requests
-      local action = scan(st)
+      local action = poll_request(st)
       if action then return action end
-      -- A PENDING flag with nothing new behind it (a server died mid-request) must not turn the idle
-      -- loop into a directory listing every tick: back off to 4 scans per second until it is removed.
-      st.next_scan_at = (st.requests == before) and (now() + 0.25) or 0
+      -- An answered request file is normal for a tick or two, until the server reads the answer and
+      -- removes it. One left behind by a server that died is re-read only 4 times per second.
+      stale = (st.requests == before) and (stale + 1) or 0
+      st.next_scan_at = (stale > 5) and (now() + 0.25) or 0
     end
     if st.resp_dirty and st.resp_written_at and now() - st.resp_written_at > RESP_CLEAR_AFTER then
       st.resp_dirty = false
@@ -609,8 +622,9 @@ local M = {
   MAX_PAYLOAD = MAX_PAYLOAD, MAX_KB_DEFAULT = MAX_KB_DEFAULT, MAX_KB_CEILING = MAX_KB_CEILING,
   hex = hex, unhex = unhex, json = json, array_shape = array_shape, envelope_json = envelope_json,
   fit_response = fit_response, new_capture = new_capture, valid_id = valid_id, parse_request = parse_request,
-  validate_request = validate_request, read_payload = read_payload, run_chunk = run_chunk, make_env = make_env,
-  ping_result = ping_result, handle = handle, scan = scan, start = start, run_loop = run_loop, main = main,
+  validate_request = validate_request, read_request = read_request, decode_payload = decode_payload,
+  run_chunk = run_chunk, make_env = make_env, ping_result = ping_result, handle = handle,
+  poll_request = poll_request, start = start, run_loop = run_loop, main = main,
 }
 
 if CFG.return_module then return M end
