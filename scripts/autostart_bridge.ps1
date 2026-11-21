@@ -5,8 +5,8 @@
 # when a Resolve with a project open has never had a bridge: the bridge session recorded in
 # Fusion.prefs belongs to another process. A bridge stopped on purpose in this Resolve stays stopped.
 #
-# install.py --autostart registers it as a scheduled task that starts at logon; it can also be run
-# by hand:  powershell -ExecutionPolicy Bypass -File scripts\autostart_bridge.ps1
+# install.py adds it to the per-user Run key, so it starts hidden at logon; it can also be run by
+# hand:  powershell -ExecutionPolicy Bypass -File scripts\autostart_bridge.ps1
 param(
     [int]$PollSeconds = 5,     # how often to look for Resolve
     [int]$GraceSeconds = 10,   # wait after a project window appears, so Resolve has finished loading

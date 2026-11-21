@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- The bridge starts by itself after each Resolve launch. `install.py` sets up a watcher by default (`--no-autostart` skips it). When a Resolve with a project open has never started the bridge, the watcher opens Workspace > Scripts > Claude_MCP_Bridge. On Windows it is a logon task running `scripts/autostart_bridge.ps1`, which uses UI Automation. On Linux it is an XDG autostart entry running `scripts/autostart_bridge.py`, which uses xdotool and finds the Workspace title in a screenshot. `--uninstall` removes either.
+- The bridge starts by itself after each Resolve launch. `install.py` sets up a watcher by default (`--no-autostart` skips it). When a Resolve with a project open has never started the bridge, the watcher opens Workspace > Scripts > Claude_MCP_Bridge. On Windows it is a per-user Run entry (no admin rights) running `scripts/autostart_bridge.ps1`, which uses UI Automation. On Linux it is an XDG autostart entry running `scripts/autostart_bridge.py`, which uses xdotool and finds the Workspace title in a screenshot. `--uninstall` removes either.
 - Linux support: Resolve in `/opt/resolve`, its per-user folder under `~/.local/share/DaVinciResolve`, and the bridge's state directory there too.
 - The bridge takes a fresh `Resolve()` object for every request instead of keeping the one from start-up.
 - `import_media` and `export_timeline` accept Windows drive paths (`C:\...`, `C:/...`) and UNC paths. Before, any path not starting with `/` was refused as not absolute. The check is `is_absolute()` in the Lua prelude.

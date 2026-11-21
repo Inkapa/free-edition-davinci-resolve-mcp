@@ -14,6 +14,7 @@ BRIDGE = "Claude_MCP_Bridge.lua"
 STOP = "Claude_MCP_Bridge_Stop.lua"
 SERVER_NAME = "davinci"
 AUTOSTART_TASK = "davinci-resolve-mcp bridge autostart"
+RUN_KEY = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_DESKTOP = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
                                  "autostart", "davinci-resolve-mcp-bridge.desktop")
 
@@ -132,20 +133,20 @@ def configure_claude_desktop(config_path, repo_dir):
 def register_autostart(repo_dir):
     """Start the bridge after every Resolve launch: a watcher that opens Workspace > Scripts >
     Claude_MCP_Bridge whenever a Resolve with a project open has no bridge. Windows runs
-    scripts/autostart_bridge.ps1 as a logon task, Linux scripts/autostart_bridge.py from the
-    desktop session's autostart folder. Both are started now as well."""
+    scripts/autostart_bridge.ps1 from the per-user Run key, Linux scripts/autostart_bridge.py from the
+    desktop session's autostart folder. Both are started now as well. Neither needs admin rights."""
     repo_dir = os.path.abspath(repo_dir)
     if WINDOWS:
         script = os.path.join(repo_dir, "scripts", "autostart_bridge.ps1")
         command = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%s"' % script
-        res = _run(["schtasks", "/Create", "/F", "/SC", "ONLOGON", "/RL", "LIMITED", "/TN", AUTOSTART_TASK, "/TR", command])
+        res = _run(["reg", "add", RUN_KEY, "/v", AUTOSTART_TASK, "/t", "REG_SZ", "/d", command, "/f"])
         if res.returncode != 0:
-            return (False, "schtasks /Create failed: " + (res.stdout or "").strip())
-        _run(["schtasks", "/End", "/TN", AUTOSTART_TASK])  # a running copy keeps the old script loaded
-        res = _run(["schtasks", "/Run", "/TN", AUTOSTART_TASK])
-        if res.returncode != 0:
-            return (False, "registered the task but could not start it: " + (res.stdout or "").strip())
-        return (True, "registered and started the scheduled task '%s'" % AUTOSTART_TASK)
+            return (False, "could not add the logon entry: " + (res.stdout or "").strip())
+        _stop_windows_watcher()  # a running copy keeps the old script loaded
+        subprocess.Popen(["powershell.exe", "-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
+                          "-File", script], creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return (True, "added '%s' to %s and started the watcher" % (AUTOSTART_TASK, RUN_KEY))
     if LINUX:
         missing = [tool for tool in ("xdotool", "import") if shutil.which(tool) is None]
         try:
@@ -173,11 +174,20 @@ def register_autostart(repo_dir):
     return (False, "no autostart on macOS yet; start the bridge from Workspace > Scripts")
 
 
+def _stop_windows_watcher():
+    """End running copies of the Windows watcher, found by their command line (never by image name:
+    other PowerShell processes keep running)."""
+    _run(["powershell.exe", "-NoProfile", "-Command",
+          "Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | "
+          "Where-Object { $_.CommandLine -like '*autostart_bridge.ps1*' } | "
+          "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"])
+
+
 def remove_autostart():
     if WINDOWS:
-        _run(["schtasks", "/End", "/TN", AUTOSTART_TASK])
-        res = _run(["schtasks", "/Delete", "/F", "/TN", AUTOSTART_TASK])
-        return "removed the scheduled task '%s'" % AUTOSTART_TASK if res.returncode == 0 else None
+        _stop_windows_watcher()
+        res = _run(["reg", "delete", RUN_KEY, "/v", AUTOSTART_TASK, "/f"])
+        return "removed '%s' from %s" % (AUTOSTART_TASK, RUN_KEY) if res.returncode == 0 else None
     if LINUX and os.path.isfile(AUTOSTART_DESKTOP):
         os.remove(AUTOSTART_DESKTOP)
         subprocess.run(["pkill", "-f", "scripts/autostart_bridge.py"])
