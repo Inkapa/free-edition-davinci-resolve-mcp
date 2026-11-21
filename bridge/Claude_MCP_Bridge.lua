@@ -274,6 +274,19 @@ local function acquire_resolve()
   return nil, "no resolve object (is a project open?)"
 end
 
+-- A fresh app object for each request. The one taken at start can go stale: after a render
+-- (Deliver, or a Fusion comp rendered from a script) page calls on it returned nil or blocked
+-- until the bridge was restarted.
+local function current_resolve(st)
+  if CFG.resolve then return st.resolve end
+  local Rf = rawget(_G, "Resolve")
+  if type(Rf) == "function" then
+    local ok, v = pcall(Rf)
+    if ok and is_api_object(v) and call_string(v, "GetProductName") then return v end
+  end
+  return st.resolve
+end
+
 local function acquire_fusion()
   if CFG.fusion then return CFG.fusion end
   for _, name in ipairs({ "fusion", "fu", "app" }) do
@@ -399,10 +412,11 @@ end
 local SHADOW = { project = true, timeline = true, mediaPool = true, projectManager = true, args = true }
 
 local function make_env(st, cap, args)
-  local env = { print = cap.print, resolve = st.resolve, fusion = st.fusion, fu = st.fusion, app = st.fusion,
+  local resolve = current_resolve(st)
+  local env = { print = cap.print, resolve = resolve, fusion = st.fusion, fu = st.fusion, app = st.fusion,
                 bmd = bmd, args = args or {} }
   pcall(function()
-    local pm = st.resolve:GetProjectManager()
+    local pm = resolve:GetProjectManager()
     env.projectManager = pm
     local project = pm and pm:GetCurrentProject() or nil
     env.project = project
@@ -447,12 +461,13 @@ end
 -- Dispatch -----------------------------------------------------------------------------------------
 
 local function ping_result(st)
-  local out = { ok = true, product = st.product, version = call_string(st.resolve, "GetVersionString"),
+  local resolve = current_resolve(st)
+  local out = { ok = true, product = st.product, version = call_string(resolve, "GetVersionString"),
                 pid = st.pid, session = st.session, uptime_s = wall() - st.started, bridge = VERSION,
                 state_dir = st.state_dir, requests = st.requests, last_error = st.last_error }
   pcall(function()
-    out.page = st.resolve:GetCurrentPage()
-    local pm = st.resolve:GetProjectManager()
+    out.page = resolve:GetCurrentPage()
+    local pm = resolve:GetProjectManager()
     local project = pm and pm:GetCurrentProject()
     out.project = project and project:GetName() or nil
     local tl = project and project:GetCurrentTimeline()

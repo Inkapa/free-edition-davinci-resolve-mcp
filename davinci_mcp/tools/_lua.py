@@ -22,6 +22,7 @@ The prelude adds (all raise a plain error sentence on failure, which the server 
   "Master", "/"); fail "No media pool folder '<path>'."
 - ``page_slice(list, offset, limit, cap)`` — returns slice, total, truncated (offset 0-based).
 - ``str(v)`` — tostring that maps nil to nil (not "nil").
+- ``is_absolute(path)`` — true for "/x", a Windows drive path ("C:" then a slash or backslash) or a UNC path.
 - ``require_studio()`` — fail "This needs DaVinci Resolve Studio; the free edition cannot run it."
   unless GetProductName contains "Studio". Call it BEFORE any Studio-only API: calling one on the
   free edition opens an upgrade dialog that wedges menu scripts.
@@ -106,6 +107,10 @@ local function page_slice(list, offset, limit, cap)
   local out = {}
   for i = offset + 1, math.min(#list, offset + limit) do out[#out + 1] = list[i] end
   return out, #list, (offset + limit) < #list
+end
+local function is_absolute(path)
+  -- "/x" on macOS and Linux; "C:\x", "C:/x" and "\\server\share" on Windows
+  return path:match("^/") ~= nil or path:match("^%a:[/\\]") ~= nil or path:match("^\\\\") ~= nil
 end
 local function require_studio()
   local name = resolve:GetProductName() or ""

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- The bridge takes a fresh `Resolve()` object for every request instead of keeping the one from start-up.
+- `import_media` and `export_timeline` accept Windows drive paths (`C:\...`, `C:/...`) and UNC paths. Before, any path not starting with `/` was refused as not absolute. The check is `is_absolute()` in the Lua prelude.
+- `export_timeline` finds the parent folder of a path written with backslashes.
+
 ## 0.3.0 (2026-11-13)
 
 First release of the Windows fork.
