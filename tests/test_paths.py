@@ -6,6 +6,8 @@ from unittest import mock
 from davinci_mcp import paths
 
 
+# The paths are built with os.path, so they only come out as Linux paths on a POSIX host.
+@unittest.skipIf(os.name == "nt", "Linux paths are checked on a POSIX host")
 class LinuxPathsTest(unittest.TestCase):
     def tearDown(self):
         importlib.reload(paths)

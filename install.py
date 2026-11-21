@@ -7,19 +7,22 @@ import stat
 import subprocess
 import sys
 
-from davinci_mcp.paths import DESKTOP_CONFIG, PYTHON, SCRIPTS_UTILITY, STATE_DIR, WINDOWS
+from davinci_mcp.paths import DESKTOP_CONFIG, LINUX, PYTHON, SCRIPTS_UTILITY, STATE_DIR, WINDOWS
 
 TOKEN = "@@STATE_DIR@@"
 BRIDGE = "Claude_MCP_Bridge.lua"
 STOP = "Claude_MCP_Bridge_Stop.lua"
 SERVER_NAME = "davinci"
 AUTOSTART_TASK = "davinci-resolve-mcp bridge autostart"
+AUTOSTART_DESKTOP = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                                 "autostart", "davinci-resolve-mcp-bridge.desktop")
 
 NEXT_STEPS = (
     "NEXT STEPS\n"
     "1) Quit and reopen DaVinci Resolve once (it scans the Scripts menu only at startup).\n"
-    "2) In Resolve: Workspace > Scripts > Claude_MCP_Bridge (do this once per Resolve session; "
-    "Claude_MCP_Bridge_Stop stops it).\n"
+    "2) Open a project. On Windows and Linux the autostart watcher then starts the bridge; on macOS "
+    "click Workspace > Scripts > Claude_MCP_Bridge once per Resolve session. "
+    "Claude_MCP_Bridge_Stop stops it.\n"
     "3) In Claude Code run /mcp and check that 'davinci' is connected, then ask for resolve_status."
 )
 
@@ -127,24 +130,59 @@ def configure_claude_desktop(config_path, repo_dir):
 
 
 def register_autostart(repo_dir):
-    """Windows: run scripts/autostart_bridge.ps1 at every logon, and start it now. It clicks
-    Workspace > Scripts > Claude_MCP_Bridge whenever a Resolve with a project open has no bridge."""
-    script = os.path.join(os.path.abspath(repo_dir), "scripts", "autostart_bridge.ps1")
-    command = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%s"' % script
-    res = _run(["schtasks", "/Create", "/F", "/SC", "ONLOGON", "/RL", "LIMITED", "/TN", AUTOSTART_TASK, "/TR", command])
-    if res.returncode != 0:
-        return (False, "schtasks /Create failed: " + (res.stdout or "").strip())
-    _run(["schtasks", "/End", "/TN", AUTOSTART_TASK])  # a running copy keeps the old script loaded
-    res = _run(["schtasks", "/Run", "/TN", AUTOSTART_TASK])
-    if res.returncode != 0:
-        return (False, "registered the task but could not start it: " + (res.stdout or "").strip())
-    return (True, "registered and started the scheduled task '%s'" % AUTOSTART_TASK)
+    """Start the bridge after every Resolve launch: a watcher that opens Workspace > Scripts >
+    Claude_MCP_Bridge whenever a Resolve with a project open has no bridge. Windows runs
+    scripts/autostart_bridge.ps1 as a logon task, Linux scripts/autostart_bridge.py from the
+    desktop session's autostart folder. Both are started now as well."""
+    repo_dir = os.path.abspath(repo_dir)
+    if WINDOWS:
+        script = os.path.join(repo_dir, "scripts", "autostart_bridge.ps1")
+        command = 'powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "%s"' % script
+        res = _run(["schtasks", "/Create", "/F", "/SC", "ONLOGON", "/RL", "LIMITED", "/TN", AUTOSTART_TASK, "/TR", command])
+        if res.returncode != 0:
+            return (False, "schtasks /Create failed: " + (res.stdout or "").strip())
+        _run(["schtasks", "/End", "/TN", AUTOSTART_TASK])  # a running copy keeps the old script loaded
+        res = _run(["schtasks", "/Run", "/TN", AUTOSTART_TASK])
+        if res.returncode != 0:
+            return (False, "registered the task but could not start it: " + (res.stdout or "").strip())
+        return (True, "registered and started the scheduled task '%s'" % AUTOSTART_TASK)
+    if LINUX:
+        missing = [tool for tool in ("xdotool", "import") if shutil.which(tool) is None]
+        try:
+            import numpy  # noqa: F401
+            import PIL  # noqa: F401
+        except ImportError:
+            missing.append("python3 Pillow and numpy")
+        script = os.path.join(repo_dir, "scripts", "autostart_bridge.py")
+        os.makedirs(os.path.dirname(AUTOSTART_DESKTOP), exist_ok=True)
+        with open(AUTOSTART_DESKTOP, "w", encoding="utf-8") as fh:
+            fh.write("[Desktop Entry]\n"
+                     "Type=Application\n"
+                     "Name=DaVinci Resolve MCP bridge autostart\n"
+                     "Comment=Starts the Claude MCP bridge in each new DaVinci Resolve\n"
+                     'Exec=%s "%s"\n' % (sys.executable, script) +
+                     "NoDisplay=true\n"
+                     "X-GNOME-Autostart-enabled=true\n")
+        subprocess.run(["pkill", "-f", script])  # a running copy keeps the old script loaded
+        subprocess.Popen([sys.executable, script], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        message = "wrote %s and started the watcher" % AUTOSTART_DESKTOP
+        if missing:
+            return (False, message + ", but it needs " + ", ".join(missing))
+        return (True, message)
+    return (False, "no autostart on macOS yet; start the bridge from Workspace > Scripts")
 
 
 def remove_autostart():
-    _run(["schtasks", "/End", "/TN", AUTOSTART_TASK])
-    res = _run(["schtasks", "/Delete", "/F", "/TN", AUTOSTART_TASK])
-    return "removed the scheduled task '%s'" % AUTOSTART_TASK if res.returncode == 0 else None
+    if WINDOWS:
+        _run(["schtasks", "/End", "/TN", AUTOSTART_TASK])
+        res = _run(["schtasks", "/Delete", "/F", "/TN", AUTOSTART_TASK])
+        return "removed the scheduled task '%s'" % AUTOSTART_TASK if res.returncode == 0 else None
+    if LINUX and os.path.isfile(AUTOSTART_DESKTOP):
+        os.remove(AUTOSTART_DESKTOP)
+        subprocess.run(["pkill", "-f", "scripts/autostart_bridge.py"])
+        return "removed " + AUTOSTART_DESKTOP
+    return None
 
 
 def check(repo_dir, scripts_dir, state_dir):
@@ -183,10 +221,9 @@ def uninstall(scripts_dir, state_dir, purge=False):
         if os.path.isfile(path):
             os.remove(path)
             actions.append("removed " + path)
-    if WINDOWS:
-        removed = remove_autostart()
-        if removed:
-            actions.append(removed)
+    removed = remove_autostart()
+    if removed:
+        actions.append(removed)
     if purge and os.path.isdir(state_dir):
         shutil.rmtree(state_dir)
         actions.append("removed " + state_dir)
@@ -201,10 +238,10 @@ def uninstall(scripts_dir, state_dir, purge=False):
 
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
-    known = {"--no-claude", "--claude-desktop", "--autostart", "--check", "--uninstall", "--purge"}
+    known = {"--no-claude", "--claude-desktop", "--no-autostart", "--check", "--uninstall", "--purge"}
     bad = [a for a in args if a not in known]
     if bad:
-        print("unknown arguments: %s\nusage: install.py [--no-claude] [--claude-desktop] "
+        print("unknown arguments: %s\nusage: install.py [--no-claude] [--claude-desktop] [--no-autostart] "
               "[--check] [--uninstall [--purge]]" % " ".join(bad), file=sys.stderr)
         return 2
     repo = os.path.dirname(os.path.abspath(__file__))
@@ -224,12 +261,9 @@ def main(argv=None):
     if "--no-claude" not in args:
         ok, msg = register_claude_code(repo)
         print(("OK: " if ok else "NOT REGISTERED: ") + msg)
-    if "--autostart" in args:
-        if WINDOWS:
-            ok, msg = register_autostart(repo)
-            print(("OK: " if ok else "AUTOSTART FAILED: ") + msg)
-        else:
-            print("--autostart is Windows only; start the bridge from Workspace > Scripts.")
+    if "--no-autostart" not in args:
+        ok, msg = register_autostart(repo)
+        print(("OK: " if ok else "AUTOSTART: ") + msg)
     print()
     print(NEXT_STEPS)
     return 0

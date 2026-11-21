@@ -34,7 +34,7 @@ Resolve 21.1 free removed Python scripts from the Workspace > Scripts menu and b
 
 ## Requirements
 
-- macOS or Windows 10/11
+- macOS, Windows 10/11, or Linux with X11
 - DaVinci Resolve 21.1.2 or 21.2, free or Studio (Windows measured on free 21.2.0.6)
 - Claude Code
 - Python 3.9 or newer: `/usr/bin/python3` on macOS; on Windows, whichever Python runs the installer
@@ -45,19 +45,34 @@ Resolve 21.1 free removed Python scripts from the Workspace > Scripts menu and b
 ```powershell
 git clone https://github.com/Inkapa/free-edition-davinci-resolve-mcp.git
 cd free-edition-davinci-resolve-mcp
-python install.py --autostart
+python install.py
 ```
 
-The installer does the same four things as on macOS (below), with these paths:
+The installer does the same four things as on macOS (below), with these paths, and also sets up the bridge autostart (next section):
 
 - Lua scripts: `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\`
 - State directory: `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\ClaudeMCP`
 - Responses are read from `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Profiles\<profile>\Fusion.prefs`
 - The Claude Code registration uses the Python that ran `install.py`.
 
-`--autostart` (Windows only) saves the click in Workspace > Scripts each time Resolve starts. It registers the scheduled task "davinci-resolve-mcp bridge autostart", which runs `scripts\autostart_bridge.ps1` at logon. The free edition runs nothing at launch and refuses external scripting, so the script watches for a Resolve with a project open and, when that Resolve has never started the bridge, opens Workspace > Scripts > Claude_MCP_Bridge through Windows UI Automation. A bridge you stop with Claude_MCP_Bridge_Stop stays stopped until Resolve restarts. It logs to `ClaudeMCP\autostart.log` in the state directory, and `--uninstall` removes the task.
-
 `--check`, `--uninstall`, `--purge` and `--claude-desktop` work the same way. The plugin install below is macOS only.
+
+## Bridge autostart (Windows and Linux)
+
+The free edition runs nothing at launch: it ignores `.scriptlib` files and refuses external scripting. Without help, the bridge needs a click in Workspace > Scripts after every Resolve launch. So on Windows and Linux the installer also starts a small watcher at login. When a Resolve with a project open has never started the bridge, the watcher opens Workspace > Scripts > Claude_MCP_Bridge itself. A bridge you stop with Claude_MCP_Bridge_Stop stays stopped until Resolve restarts. The watcher logs to `autostart.log` in the state directory. Pass `--no-autostart` to skip it; `--uninstall` removes it.
+
+- **Windows:** the scheduled task "davinci-resolve-mcp bridge autostart" runs `scripts\autostart_bridge.ps1` at logon. It reaches the menu through Windows UI Automation.
+- **Linux (X11):** `~/.config/autostart/davinci-resolve-mcp-bridge.desktop` runs `scripts/autostart_bridge.py` with the desktop session (GNOME, KDE, or i3 with `dex --autostart`). Resolve's bundled Qt does not publish its menus over AT-SPI, so the watcher uses `xdotool`: it finds the Workspace title in a screenshot of the window, clicks it, then presses Up, Right and Return. That runs the first script in the Scripts menu, which is Claude_MCP_Bridge unless you have another script whose name sorts before it. It needs `xdotool`, ImageMagick's `import`, and Python's Pillow and numpy; the installer says which are missing. Wayland sessions are not supported.
+
+## Install on Linux
+
+```bash
+git clone https://github.com/Inkapa/free-edition-davinci-resolve-mcp.git
+cd free-edition-davinci-resolve-mcp
+python3 install.py
+```
+
+Resolve is looked for in `/opt/resolve` (Blackmagic's installer and the AUR package; set `RESOLVE_INSTALL_DIR` otherwise). Its per-user folder is `~/.local/share/DaVinciResolve` (or `$XDG_DATA_HOME/DaVinciResolve`), which holds `Fusion/Scripts/Utility/`, `Fusion/Profiles/<profile>/Fusion.prefs` and the `ClaudeMCP` state directory. The bridge needs Resolve's Fusion scripting to start: if Resolve's log (`~/.local/share/DaVinciResolve/logs/ResolveDebug.txt`) says "Fusion DoAction ... ignored, init not completed", Lua menu scripts do not run and the bridge cannot either.
 
 ## Install on macOS
 
@@ -119,7 +134,7 @@ two are not interchangeable: a 0.2 bridge and a 0.3 server cannot talk to each o
 ## Daily use
 
 1. Open Resolve with a project.
-2. Click Workspace > Scripts > Claude_MCP_Bridge. Do this once per Resolve session, or install with `--autostart` on Windows to have it done for you.
+2. On Windows and Linux the autostart watcher starts the bridge within about 15 s. On macOS, or if you installed with `--no-autostart`, click Workspace > Scripts > Claude_MCP_Bridge once per Resolve session.
 3. In Claude Code, ask for `resolve_status` first. It tells you whether the bridge is alive.
 4. To stop the bridge, click Workspace > Scripts > Claude_MCP_Bridge_Stop.
 
