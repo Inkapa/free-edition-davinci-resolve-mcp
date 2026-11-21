@@ -1,15 +1,16 @@
 """Where Resolve, the bridge and the MCP clients keep their files, per platform.
 
-macOS and Windows lay out Resolve's per-user folder the same way below one root:
-``~/Library/Application Support/Blackmagic Design/DaVinci Resolve`` on macOS and
-``%APPDATA%\\Blackmagic Design\\DaVinci Resolve\\Support`` on Windows. Every other module takes its
-paths from here.
+All three platforms lay out Resolve's per-user folder the same way below one root:
+``~/Library/Application Support/Blackmagic Design/DaVinci Resolve`` on macOS,
+``%APPDATA%\\Blackmagic Design\\DaVinci Resolve\\Support`` on Windows and
+``~/.local/share/DaVinciResolve`` on Linux. Every other module takes its paths from here.
 """
 
 import os
 import sys
 
 WINDOWS = sys.platform == "win32"
+LINUX = sys.platform.startswith("linux")
 
 if WINDOWS:
     _APPDATA = os.environ.get("APPDATA") or os.path.expanduser(os.path.join("~", "AppData", "Roaming"))
@@ -22,6 +23,18 @@ if WINDOWS:
     FUSCRIPT = os.path.join(os.environ.get("PROGRAMFILES", "C:\\Program Files"),
                             "Blackmagic Design", "DaVinci Resolve", "fuscript.exe")
     RESOLVE_IMAGE = "Resolve.exe"
+elif LINUX:
+    # Blackmagic's Linux installer (and the AUR package) put Resolve in /opt/resolve.
+    _INSTALL = os.environ.get("RESOLVE_INSTALL_DIR") or "/opt/resolve"
+    _DATA_HOME = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    _CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    RESOLVE_SUPPORT = os.path.join(_DATA_HOME, "DaVinciResolve")
+    DOCS_DIR = os.path.join(_INSTALL, "Developer", "Scripting")
+    DESKTOP_CONFIG = os.path.join(_CONFIG_HOME, "Claude", "claude_desktop_config.json")
+    PYTHON = "/usr/bin/python3"
+    FUSCRIPT = os.path.join(_INSTALL, "libs", "Fusion", "fuscript")
+    # Matched with pgrep -f; the full path keeps the panel daemons in /opt/resolve/bin out.
+    RESOLVE_IMAGE = os.path.join(_INSTALL, "bin", "resolve")
 else:
     _SUPPORT = os.path.expanduser("~/Library/Application Support")
     RESOLVE_SUPPORT = os.path.join(_SUPPORT, "Blackmagic Design", "DaVinci Resolve")
