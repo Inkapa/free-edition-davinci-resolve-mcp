@@ -304,7 +304,12 @@ local function resolve_state_dir()
   if #STATE_DIR_STAMP > 0 and STATE_DIR_STAMP:sub(1, 2) ~= "@@" then return (STATE_DIR_STAMP:gsub("[/\\]+$", "")) end
   local home = os.getenv("HOME")
   if type(home) == "string" and #home > 0 then
-    return home .. "/Library/Application Support/Blackmagic Design/DaVinci Resolve/ClaudeMCP"
+    local mac_support = home .. "/Library/Application Support/Blackmagic Design/DaVinci Resolve"
+    if file_exists(mac_support) then return mac_support .. "/ClaudeMCP" end
+    -- Linux keeps Resolve's per-user folder under the XDG data directory.
+    local data_home = os.getenv("XDG_DATA_HOME")
+    if type(data_home) ~= "string" or #data_home == 0 then data_home = home .. "/.local/share" end
+    return data_home .. "/DaVinciResolve/ClaudeMCP"
   end
   local appdata = os.getenv("APPDATA")
   if type(appdata) == "string" and #appdata > 0 then
