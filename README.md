@@ -55,7 +55,7 @@ The installer does the same four things as on macOS (below), with these paths:
 - Responses are read from `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Profiles\<profile>\Fusion.prefs`
 - The Claude Code registration uses the Python that ran `install.py`.
 
-`--autostart` (Windows only) saves the click in Workspace > Scripts each time Resolve starts. It registers the scheduled task "davinci-resolve-mcp bridge autostart", which runs `scriptsutostart_bridge.ps1` at logon. The free edition runs nothing at launch and refuses external scripting, so the script watches for a Resolve with a project open and, when that Resolve has never started the bridge, opens Workspace > Scripts > Claude_MCP_Bridge through Windows UI Automation. A bridge you stop with Claude_MCP_Bridge_Stop stays stopped until Resolve restarts. It logs to `ClaudeMCPutostart.log` in the state directory, and `--uninstall` removes the task.
+`--autostart` (Windows only) saves the click in Workspace > Scripts each time Resolve starts. It registers the scheduled task "davinci-resolve-mcp bridge autostart", which runs `scripts\autostart_bridge.ps1` at logon. The free edition runs nothing at launch and refuses external scripting, so the script watches for a Resolve with a project open and, when that Resolve has never started the bridge, opens Workspace > Scripts > Claude_MCP_Bridge through Windows UI Automation. A bridge you stop with Claude_MCP_Bridge_Stop stays stopped until Resolve restarts. It logs to `ClaudeMCP\autostart.log` in the state directory, and `--uninstall` removes the task.
 
 `--check`, `--uninstall`, `--purge` and `--claude-desktop` work the same way. The plugin install below is macOS only.
 
