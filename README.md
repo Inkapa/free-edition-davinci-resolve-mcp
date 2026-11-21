@@ -43,9 +43,9 @@ Resolve 21.1 free removed Python scripts from the Workspace > Scripts menu and b
 ## Install on Windows
 
 ```powershell
-git clone https://github.com/Inkapa/davinci-resolve-mcp.git
-cd davinci-resolve-mcp
-python install.py
+git clone https://github.com/Inkapa/free-edition-davinci-resolve-mcp.git
+cd free-edition-davinci-resolve-mcp
+python install.py --autostart
 ```
 
 The installer does the same four things as on macOS (below), with these paths:
@@ -54,6 +54,8 @@ The installer does the same four things as on macOS (below), with these paths:
 - State directory: `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\ClaudeMCP`
 - Responses are read from `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Profiles\<profile>\Fusion.prefs`
 - The Claude Code registration uses the Python that ran `install.py`.
+
+`--autostart` (Windows only) saves the click in Workspace > Scripts each time Resolve starts. It registers the scheduled task "davinci-resolve-mcp bridge autostart", which runs `scriptsutostart_bridge.ps1` at logon. The free edition runs nothing at launch and refuses external scripting, so the script watches for a Resolve with a project open and, when that Resolve has never started the bridge, opens Workspace > Scripts > Claude_MCP_Bridge through Windows UI Automation. A bridge you stop with Claude_MCP_Bridge_Stop stays stopped until Resolve restarts. It logs to `ClaudeMCPutostart.log` in the state directory, and `--uninstall` removes the task.
 
 `--check`, `--uninstall`, `--purge` and `--claude-desktop` work the same way. The plugin install below is macOS only.
 
@@ -117,7 +119,7 @@ two are not interchangeable: a 0.2 bridge and a 0.3 server cannot talk to each o
 ## Daily use
 
 1. Open Resolve with a project.
-2. Click Workspace > Scripts > Claude_MCP_Bridge. Do this once per Resolve session.
+2. Click Workspace > Scripts > Claude_MCP_Bridge. Do this once per Resolve session, or install with `--autostart` on Windows to have it done for you.
 3. In Claude Code, ask for `resolve_status` first. It tells you whether the bridge is alive.
 4. To stop the bridge, click Workspace > Scripts > Claude_MCP_Bridge_Stop.
 
